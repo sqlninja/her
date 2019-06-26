@@ -2,9 +2,9 @@ module Her
   module Model
     module Associations
       class Association
-
         # @private
         attr_accessor :params
+        attr_reader :klass
 
         # @private
         def initialize(parent, opts = {})
@@ -14,6 +14,17 @@ module Her
 
           @klass = @parent.class.her_nearby_class(@opts[:class_name])
           @name = @opts[:name]
+        end
+
+        def call_scope(name, *args, &block)
+          parent_id_string = "#{@parent.class.to_s.demodulize.downcase}_#{@parent.class.primary_key}"
+          parent_id = @parent.send(@parent.class.primary_key)
+          scoped = if klass.collection_path[parent_id_string]
+            klass.where("_#{parent_id_string}" => parent_id)
+          else
+            klass
+          end
+          scoped.send(name, *args, &block)
         end
 
         # @private
@@ -27,7 +38,11 @@ module Her
           return {} unless data[data_key]
 
           klass = klass.her_nearby_class(association[:class_name])
-          { association[:name] => klass.instantiate_record(klass, data: data[data_key]) }
+          if data[data_key].kind_of?(klass)
+            { association[:name] => data[data_key] }
+          else
+            { association[:name] => klass.new(data[data_key]) }
+          end
         end
 
         # @private
@@ -44,28 +59,21 @@ module Her
           attribute_value = @parent.attributes[@name]
           return @opts[:default].try(:dup) if @parent.attributes.include?(@name) && (attribute_value.nil? || !attribute_value.nil? && attribute_value.empty?) && @params.empty?
 
-          return @cached_result unless @params.any? || @cached_result.nil?
-          return @parent.attributes[@name] unless @params.any? || @parent.attributes[@name].blank?
-          return @opts[:default].try(:dup) if @parent.new?
-
-          path = build_association_path -> { "#{@parent.request_path(@params)}#{@opts[:path]}" }
-          @klass.get(path, @params).tap do |result|
-            @cached_result = result unless @params.any?
+          if @parent.attributes[@name].blank? || @params.any?
+            path = build_association_path lambda { "#{@parent.request_path(@params)}#{@opts[:path]}" }
+            @klass.get(path, @params)
+          else
+            @parent.attributes[@name]
           end
         end
 
         # @private
         def build_association_path(code)
-          instance_exec(&code)
-        rescue Her::Errors::PathError
-          nil
-        end
-
-        # @private
-        def reset
-          @params = {}
-          @cached_result = nil
-          @parent.attributes.delete(@name)
+          begin
+            instance_exec(&code)
+          rescue Her::Errors::PathError
+            return nil
+          end
         end
 
         # Add query parameters to the HTTP request performed to fetch the data
@@ -80,7 +88,7 @@ module Her
         #   user.comments.where(:approved => 1) # Fetched via GET "/users/1/comments?approved=1
         def where(params = {})
           return self if params.blank? && @parent.attributes[@name].blank?
-          AssociationProxy.new clone.tap { |a| a.params = a.params.merge(params) }
+          AssociationProxy.new self.clone.tap { |a| a.params = a.params.merge(params) }
         end
         alias all where
 
@@ -96,32 +104,10 @@ module Her
         #   user.comments.find(3) # Fetched via GET "/users/1/comments/3
         def find(id)
           return nil if id.blank?
-          path = build_association_path -> { "#{@parent.request_path(@params)}#{@opts[:path]}/#{id}" }
-          @klass.get_resource(path, @params)
+          path = build_association_path lambda { "#{@parent.request_path(@params)}#{@opts[:path]}/#{id}" }
+          @klass.get(path, @params)
         end
 
-        # Refetches the association and puts the proxy back in its initial state,
-        # which is unloaded. Cached associations are cleared.
-        #
-        # @example
-        #   class User
-        #     include Her::Model
-        #     has_many :comments
-        #   end
-        #
-        #   class Comment
-        #     include Her::Model
-        #   end
-        #
-        #   user = User.find(1)
-        #   user.comments = [#<Comment(comments/2) id=2 body="Hello!">]
-        #   user.comments.first.id = "Oops"
-        #   user.comments.reload # => [#<Comment(comments/2) id=2 body="Hello!">]
-        #   # Fetched again via GET "/users/1/comments"
-        def reload
-          reset
-          fetch
-        end
       end
     end
   end
